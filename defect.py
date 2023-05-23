@@ -317,7 +317,7 @@ def train_white_model(base_folder,x_min,y_min,x_max,y_max):
 
 
 if __name__ == '__main__':
-    folder_list=glob.glob(os.path.join('E:\IQT\defect_data','QA9Q230520064','L','white.png'))
+    folder_list=glob.glob(os.path.join('E:\IQT\defect_data','*','*','white.png'))
     for folder_path in folder_list:
         try:
             main_folder=os.path.dirname(folder_path)
