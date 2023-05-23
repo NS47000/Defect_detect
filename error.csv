@@ -1,0 +1,10 @@
+QA9Q230519005,L,error!! 
+QA9Q230519013,L,error!! 
+QA9Q230520016,L,error!! 
+QA9Q230520016,R,error!! 
+QA9Q230520030,L,error!! 
+QA9Q230520064,L,error!! 
+QA9Q230520104,R,error!! 
+QA9Q230520107,L,error!! 
+QA9Q230520107,R,error!! 
+QA9Q230520064,L,File "c:\Users\11011105\google\quanta\a9Q\defect\defect.py", line 55, in detect_roi: [UnboundLocalError] local variable 'x_min' referenced before assignment 

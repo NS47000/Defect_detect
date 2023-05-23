@@ -1,0 +1,1 @@
+Call ..\bin64\oe-tool\set-current.bat L 100 230 100
