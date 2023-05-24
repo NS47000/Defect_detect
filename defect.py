@@ -8,6 +8,7 @@ from sklearn import svm
 import traceback
 from sklearn.model_selection import train_test_split
 import basler
+import multiprocessing as mp
 
 threshold=30
 blur_size=40#綠波閥值
@@ -313,225 +314,244 @@ def train_white_model(base_folder,x_min,y_min,x_max,y_max):
     #print(y_hat2)#show output
     joblib.dump(clf,os.path.join(base_folder,"svm_model_white.m"))#save model
     return clf.score(x_test, y_test)
-    
+
+def DefectProc(folder_path):
+    try:
+        main_folder=os.path.dirname(folder_path)
+        Accurate=train_model(main_folder)
+        pattern_name="test.png"
+        if need_capture!=False:
+            capture(pattern_name,"detect_1and2pixel.png")
+            A9Q_close()
+        after_filter,roi_img,draw_img,x_min,y_min,x_max,y_max=filter(main_folder,os.path.join(main_folder,"white.png"))
+        draw_img_rgb=cv2.cvtColor(draw_img,cv2.COLOR_GRAY2BGR)
+        after_img=cv2.imread(os.path.join(main_folder,after_filter),0)
+        after_img=cv2.medianBlur(after_img,5)
+        thr=filter_thr
+        _,thresh = cv2.threshold(after_img,thr,255,cv2.THRESH_BINARY)  
+        kernel=(5,5)
+        thresh = cv2.erode(thresh, kernel,iterations=1)   # 侵蝕
+        thresh= cv2.dilate(thresh, kernel,iterations=1)  # 擴張
+        #showimage(thresh)
+        contour_area=[]
+        contour_graylevel=[]
+        contour_var=[]
+        center_pos=[]
+        
+        contours, _hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+        image_rgb=cv2.cvtColor(thresh,cv2.COLOR_GRAY2BGR)
+        roi_size=10
+        num=0
+        for contour in contours:
+            if cv2.contourArea(contour)>15 and cv2.contourArea(contour)<5000 :
+                #print(cv2.contourArea(contour))
+                
+                
+                M=cv2.moments(contour)
+                cx=int(M['m10']/M['m00'])
+                cy=int(M['m01']/M['m00'])
+                contour_cut=roi_img[cy-roi_size:cy+roi_size,cx-roi_size:cx+roi_size]
+                if np.mean(contour_cut.flatten(),dtype=float)>0 and np.var(contour_cut.flatten(),dtype=float)>0:
+                    contour_area.append(cv2.contourArea(contour))
+                    contour_graylevel.append(np.mean(contour_cut.flatten(),dtype=float))
+                    contour_var.append(np.var(contour_cut.flatten(),dtype=float))
+                    center_pos.append([cy,cx])
+                    num+=1
+                    cv2.drawContours(image_rgb,contour,-1,(0,255,0),2)
+        cv2.imwrite(os.path.join(main_folder,"check_contour.png"),image_rgb)
+        #print("Detect {} points!!".format(num))
+        data_x=np.zeros((len(contour_area),3))
+        #data_y=np.zeros((len(contour_area),1))
+        for i in range(0,len(contour_area)):
+            data_x[i,0]=contour_area[i]
+            data_x[i,1]=contour_graylevel[i]
+            data_x[i,2]=contour_var[i]
+            
+        data_x_mean=np.load('normalize_parameter.npy')
+        for i in range(0,len(contour_area)):
+            data_x[i,0]/=data_x_mean[0]
+            data_x[i,1]/=data_x_mean[1]
+            data_x[i,2]/=data_x_mean[2]
+        #print("data_x_mean:")
+        #print(data_x_mean)
+        clf=joblib.load(os.path.join(main_folder,"svm_model.m"))
+        cat_number = 0
+        one_pixel_number=0
+        two_pixel_number=0
+        three_pixel_number=0
+        four_pixel_number=0
+        if len(data_x)!=0:
+            index_svm=clf.predict(data_x)
+            
+            for defect in range(0,len(index_svm)):
+                if int(index_svm[defect])==1:#將分類結果畫圖秀出來
+                    #if len(c) < 15: # noise
+                    one_pixel_number += 1
+                    cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (255, 0, 0), 2) 
+                elif int(index_svm[defect])==2: 
+                    two_pixel_number += 1
+                    cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (0, 255, 0), 2) 
+                elif int(index_svm[defect])==3:
+                    three_pixel_number += 1
+                    cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (0, 0, 255), 2) 
+                else:
+                    four_pixel_number += 1
+                    cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (255, 0, 255), 2) 
+            print("one_pixel detect: {} points".format(one_pixel_number))
+            print("two_pixel detect: {} points".format(two_pixel_number))
+            print("three_pixel detect: {} points".format(three_pixel_number))
+            print("four_pixel detect: {} points".format(four_pixel_number))
+        else:
+            print("No any black defect")
+        cv2.imwrite(os.path.join(main_folder,"result.png"),draw_img_rgb)
+        
+        #sys.exit(1)
+        #==============white===========================================
+        Accurate_w=train_white_model(main_folder,x_min,y_min,x_max,y_max)
+        pattern_name="test_white.png"
+        if need_capture!=False:
+            capture_white(pattern_name,"detect_1and2pixel_white.png")
+            A9Q_close()
+        after_filter,roi_img,draw_img=filter_white(main_folder,os.path.join(main_folder,"black.png"),x_min,y_min,x_max,y_max)
+        draw_img_rgb=cv2.cvtColor(draw_img,cv2.COLOR_GRAY2BGR)
+        after_img=cv2.imread(os.path.join(main_folder,after_filter),0)
+        #showimage(after_img)
+        after_img=cv2.medianBlur(after_img,5)
+        #showimage(after_img)
+        thr=filter_thr_white
+        _,thresh = cv2.threshold(after_img,thr,255,cv2.THRESH_BINARY)  
+        kernel=(5,5)
+        #showimage(thresh)
+        thresh= cv2.dilate(thresh, kernel)  # 擴張
+        thresh = cv2.erode(thresh, kernel)   # 侵蝕
+        #showimage(thresh)
+        contour_area=[]
+        contour_graylevel=[]
+        contour_var=[]
+        center_pos=[]
+        
+        contours, _hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+        image_rgb=cv2.cvtColor(thresh,cv2.COLOR_GRAY2BGR)
+        roi_size=10
+        num=0
+        for contour in contours:
+            if cv2.contourArea(contour)>5 and cv2.contourArea(contour)<5000 :
+                #print(cv2.contourArea(contour))
+                
+                
+                M=cv2.moments(contour)
+                cx=int(M['m10']/M['m00'])
+                cy=int(M['m01']/M['m00'])
+                contour_cut=roi_img[cy-roi_size:cy+roi_size,cx-roi_size:cx+roi_size]
+                if np.mean(contour_cut.flatten(),dtype=float)>0 and np.var(contour_cut.flatten(),dtype=float)>0:
+                    contour_area.append(cv2.contourArea(contour))
+                    contour_graylevel.append(np.mean(contour_cut.flatten(),dtype=float))
+                    contour_var.append(np.var(contour_cut.flatten(),dtype=float))
+                    center_pos.append([cy,cx])
+                    num+=1
+                    cv2.drawContours(image_rgb,contour,-1,(0,255,0),2)
+        cv2.imwrite(os.path.join(main_folder,"check_contour_white.png"),image_rgb)
+        print("Detect {} White points!!".format(num))
+        data_x=np.zeros((len(contour_area),3))
+        #data_y=np.zeros((len(contour_area),1))
+        for i in range(0,len(contour_area)):
+            data_x[i,0]=contour_area[i]
+            data_x[i,1]=contour_graylevel[i]
+            data_x[i,2]=contour_var[i]
+            
+        data_x_mean=np.load(os.path.join(main_folder,'normalize_parameter_white.npy'))
+        for i in range(0,len(contour_area)):
+            data_x[i,0]/=data_x_mean[0]
+            data_x[i,1]/=data_x_mean[1]
+            data_x[i,2]/=data_x_mean[2]
+        #print("data_x_mean(area,gray,var):")
+        #print(data_x_mean)
+        clf=joblib.load(os.path.join(main_folder,"svm_model_white.m"))
+        cat_number = 0
+        one_pixel_number_w=0
+        two_pixel_number_w=0
+        three_pixel_number_w=0
+        four_pixel_number_w=0
+        if len(data_x)!=0:
+            index_svm=clf.predict(data_x)
+            
+            
+            for defect in range(0,len(index_svm)):
+                if int(index_svm[defect])==1:#將分類結果畫圖秀出來
+                    #if len(c) < 15: # noise
+                    one_pixel_number_w += 1
+                    cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (255, 0, 0), 2) 
+                elif int(index_svm[defect])==2: 
+                    two_pixel_number_w += 1
+                    cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (0, 255, 0), 2) 
+                elif int(index_svm[defect])==3:
+                    three_pixel_number_w += 1
+                    cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (0, 0, 255), 2) 
+                else:
+                    four_pixel_number_w += 1
+                    cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (255, 0, 255), 2) 
+            #print("one_Whitepixel detect: {} points".format(one_pixel_number))
+            #print("two_Whitepixel detect: {} points".format(two_pixel_number))
+            #print("three_Whitepixel detect: {} points".format(three_pixel_number))
+            #print("four_Whitepixel detect: {} points".format(four_pixel_number))
+            #print("Accuracy:{}".format(max([one_pixel_number,two_pixel_number,three_pixel_number,four_pixel_number])/(one_pixel_number+two_pixel_number+three_pixel_number+four_pixel_number)))
+            print("one_Whitepixel_w detect: {} points".format(one_pixel_number_w))
+            print("two_Whitepixel_w detect: {} points".format(two_pixel_number_w))
+            print("three_Whitepixel_w detect: {} points".format(three_pixel_number_w))
+            print("four_Whitepixel_w detect: {} points".format(four_pixel_number_w))
+            print("Accuracy_w:{}".format(max([one_pixel_number_w,two_pixel_number_w,three_pixel_number_w,four_pixel_number_w])/(one_pixel_number_w+two_pixel_number_w+three_pixel_number_w+four_pixel_number_w)))
+        else:
+            print("No any white defect")
+        cv2.imwrite(os.path.join(main_folder,"result_white.png"),draw_img_rgb)
+        if os.path.exists("result.csv")==0:
+            with open("result.csv",'w') as f:
+                f.write("SN,Side,one_pixel_number,two_pixel_number,three_pixel_number,four_pixel_number,one_pixel_number_w,two_pixel_number_w,three_pixel_number_w,four_pixel_number_w,Accurate,Accurate_w \n")
+            
+        with open("result.csv",'a') as f:
+            sn=os.path.dirname(main_folder).split('\\')[-1] 
+            side=main_folder.split('\\')[-1] 
+            print("SN:{} Side:{} done!!!".format(sn,side))
+            f.write("{},{},{},{},{},{},{},{},{},{},{},{} \n".format(sn,side,one_pixel_number,two_pixel_number,three_pixel_number,four_pixel_number,one_pixel_number_w,two_pixel_number_w,three_pixel_number_w,four_pixel_number_w,Accurate,Accurate_w))
+    except Exception as e:
+        
+        print(e)
+        error_class = e.__class__.__name__ #取得錯誤類型
+        detail = e.args[0] #取得詳細內容
+        cl, exc, tb = sys.exc_info() #取得Call Stack
+        lastCallStack = traceback.extract_tb(tb)[-1] #取得Call Stack的最後一筆資料
+        fileName = lastCallStack[0] #取得發生的檔案名稱
+        lineNum = lastCallStack[1] #取得發生的行號
+        funcName = lastCallStack[2] #取得發生的函數名稱
+        errMsg = "File \"{}\", line {}, in {}: [{}] {}".format(fileName, lineNum, funcName, error_class, detail)
+        print(errMsg)
+        with open("error.csv",'a') as f:
+            sn=os.path.dirname(main_folder).split('\\')[-1] 
+            side=main_folder.split('\\')[-1] 
+            print("SN:{} Side:{} error!!!".format(sn,side))
+            f.write("{},{},{} \n".format(sn,side,errMsg))
 
 
 if __name__ == '__main__':
     folder_list=glob.glob(os.path.join('E:\IQT\defect_data','*','*','white.png'))
-    for folder_path in folder_list:
-        try:
-            main_folder=os.path.dirname(folder_path)
-            Accurate=train_model(main_folder)
-            pattern_name="test.png"
-            if need_capture!=False:
-                capture(pattern_name,"detect_1and2pixel.png")
-                A9Q_close()
-            after_filter,roi_img,draw_img,x_min,y_min,x_max,y_max=filter(main_folder,os.path.join(main_folder,"white.png"))
-            draw_img_rgb=cv2.cvtColor(draw_img,cv2.COLOR_GRAY2BGR)
-            after_img=cv2.imread(os.path.join(main_folder,after_filter),0)
-            after_img=cv2.medianBlur(after_img,5)
-            thr=filter_thr
-            _,thresh = cv2.threshold(after_img,thr,255,cv2.THRESH_BINARY)  
-            kernel=(5,5)
-            thresh = cv2.erode(thresh, kernel,iterations=1)   # 侵蝕
-            thresh= cv2.dilate(thresh, kernel,iterations=1)  # 擴張
-            #showimage(thresh)
-            contour_area=[]
-            contour_graylevel=[]
-            contour_var=[]
-            center_pos=[]
-            
-            contours, _hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
-            image_rgb=cv2.cvtColor(thresh,cv2.COLOR_GRAY2BGR)
-            roi_size=10
-            num=0
-            for contour in contours:
-                if cv2.contourArea(contour)>15 and cv2.contourArea(contour)<5000 :
-                    #print(cv2.contourArea(contour))
-                    
-                    
-                    M=cv2.moments(contour)
-                    cx=int(M['m10']/M['m00'])
-                    cy=int(M['m01']/M['m00'])
-                    contour_cut=roi_img[cy-roi_size:cy+roi_size,cx-roi_size:cx+roi_size]
-                    if np.mean(contour_cut.flatten(),dtype=float)>0 and np.var(contour_cut.flatten(),dtype=float)>0:
-                        contour_area.append(cv2.contourArea(contour))
-                        contour_graylevel.append(np.mean(contour_cut.flatten(),dtype=float))
-                        contour_var.append(np.var(contour_cut.flatten(),dtype=float))
-                        center_pos.append([cy,cx])
-                        num+=1
-                        cv2.drawContours(image_rgb,contour,-1,(0,255,0),2)
-            cv2.imwrite(os.path.join(main_folder,"check_contour.png"),image_rgb)
-            #print("Detect {} points!!".format(num))
-            data_x=np.zeros((len(contour_area),3))
-            #data_y=np.zeros((len(contour_area),1))
-            for i in range(0,len(contour_area)):
-                data_x[i,0]=contour_area[i]
-                data_x[i,1]=contour_graylevel[i]
-                data_x[i,2]=contour_var[i]
-                
-            data_x_mean=np.load('normalize_parameter.npy')
-            for i in range(0,len(contour_area)):
-                data_x[i,0]/=data_x_mean[0]
-                data_x[i,1]/=data_x_mean[1]
-                data_x[i,2]/=data_x_mean[2]
-            #print("data_x_mean:")
-            #print(data_x_mean)
-            clf=joblib.load(os.path.join(main_folder,"svm_model.m"))
-            cat_number = 0
-            one_pixel_number=0
-            two_pixel_number=0
-            three_pixel_number=0
-            four_pixel_number=0
-            if len(data_x)!=0:
-                index_svm=clf.predict(data_x)
-                
-                for defect in range(0,len(index_svm)):
-                    if int(index_svm[defect])==1:#將分類結果畫圖秀出來
-                        #if len(c) < 15: # noise
-                        one_pixel_number += 1
-                        cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (255, 0, 0), 2) 
-                    elif int(index_svm[defect])==2: 
-                        two_pixel_number += 1
-                        cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (0, 255, 0), 2) 
-                    elif int(index_svm[defect])==3:
-                        three_pixel_number += 1
-                        cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (0, 0, 255), 2) 
-                    else:
-                        four_pixel_number += 1
-                        cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (255, 0, 255), 2) 
-                print("one_pixel detect: {} points".format(one_pixel_number))
-                print("two_pixel detect: {} points".format(two_pixel_number))
-                print("three_pixel detect: {} points".format(three_pixel_number))
-                print("four_pixel detect: {} points".format(four_pixel_number))
-            else:
-                print("No any black defect")
-            cv2.imwrite(os.path.join(main_folder,"result.png"),draw_img_rgb)
-            
-            #sys.exit(1)
-            #==============white===========================================
-            Accurate_w=train_white_model(main_folder,x_min,y_min,x_max,y_max)
-            pattern_name="test_white.png"
-            if need_capture!=False:
-                capture_white(pattern_name,"detect_1and2pixel_white.png")
-                A9Q_close()
-            after_filter,roi_img,draw_img=filter_white(main_folder,os.path.join(main_folder,"black.png"),x_min,y_min,x_max,y_max)
-            draw_img_rgb=cv2.cvtColor(draw_img,cv2.COLOR_GRAY2BGR)
-            after_img=cv2.imread(os.path.join(main_folder,after_filter),0)
-            #showimage(after_img)
-            after_img=cv2.medianBlur(after_img,5)
-            #showimage(after_img)
-            thr=filter_thr_white
-            _,thresh = cv2.threshold(after_img,thr,255,cv2.THRESH_BINARY)  
-            kernel=(5,5)
-            #showimage(thresh)
-            thresh= cv2.dilate(thresh, kernel)  # 擴張
-            thresh = cv2.erode(thresh, kernel)   # 侵蝕
-            #showimage(thresh)
-            contour_area=[]
-            contour_graylevel=[]
-            contour_var=[]
-            center_pos=[]
-            
-            contours, _hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
-            image_rgb=cv2.cvtColor(thresh,cv2.COLOR_GRAY2BGR)
-            roi_size=10
-            num=0
-            for contour in contours:
-                if cv2.contourArea(contour)>5 and cv2.contourArea(contour)<5000 :
-                    #print(cv2.contourArea(contour))
-                    
-                    
-                    M=cv2.moments(contour)
-                    cx=int(M['m10']/M['m00'])
-                    cy=int(M['m01']/M['m00'])
-                    contour_cut=roi_img[cy-roi_size:cy+roi_size,cx-roi_size:cx+roi_size]
-                    if np.mean(contour_cut.flatten(),dtype=float)>0 and np.var(contour_cut.flatten(),dtype=float)>0:
-                        contour_area.append(cv2.contourArea(contour))
-                        contour_graylevel.append(np.mean(contour_cut.flatten(),dtype=float))
-                        contour_var.append(np.var(contour_cut.flatten(),dtype=float))
-                        center_pos.append([cy,cx])
-                        num+=1
-                        cv2.drawContours(image_rgb,contour,-1,(0,255,0),2)
-            cv2.imwrite(os.path.join(main_folder,"check_contour_white.png"),image_rgb)
-            print("Detect {} White points!!".format(num))
-            data_x=np.zeros((len(contour_area),3))
-            #data_y=np.zeros((len(contour_area),1))
-            for i in range(0,len(contour_area)):
-                data_x[i,0]=contour_area[i]
-                data_x[i,1]=contour_graylevel[i]
-                data_x[i,2]=contour_var[i]
-                
-            data_x_mean=np.load(os.path.join(main_folder,'normalize_parameter_white.npy'))
-            for i in range(0,len(contour_area)):
-                data_x[i,0]/=data_x_mean[0]
-                data_x[i,1]/=data_x_mean[1]
-                data_x[i,2]/=data_x_mean[2]
-            #print("data_x_mean(area,gray,var):")
-            #print(data_x_mean)
-            clf=joblib.load(os.path.join(main_folder,"svm_model_white.m"))
-            cat_number = 0
-            one_pixel_number_w=0
-            two_pixel_number_w=0
-            three_pixel_number_w=0
-            four_pixel_number_w=0
-            if len(data_x)!=0:
-                index_svm=clf.predict(data_x)
-                
-                
-                for defect in range(0,len(index_svm)):
-                    if int(index_svm[defect])==1:#將分類結果畫圖秀出來
-                        #if len(c) < 15: # noise
-                        one_pixel_number_w += 1
-                        cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (255, 0, 0), 2) 
-                    elif int(index_svm[defect])==2: 
-                        two_pixel_number_w += 1
-                        cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (0, 255, 0), 2) 
-                    elif int(index_svm[defect])==3:
-                        three_pixel_number_w += 1
-                        cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (0, 0, 255), 2) 
-                    else:
-                        four_pixel_number_w += 1
-                        cv2.rectangle(draw_img_rgb, (center_pos[defect][1]-roi_size+x_min,center_pos[defect][0]-roi_size+y_min),(center_pos[defect][1]+roi_size+x_min,center_pos[defect][0]+roi_size+y_min), (255, 0, 255), 2) 
-                #print("one_Whitepixel detect: {} points".format(one_pixel_number))
-                #print("two_Whitepixel detect: {} points".format(two_pixel_number))
-                #print("three_Whitepixel detect: {} points".format(three_pixel_number))
-                #print("four_Whitepixel detect: {} points".format(four_pixel_number))
-                #print("Accuracy:{}".format(max([one_pixel_number,two_pixel_number,three_pixel_number,four_pixel_number])/(one_pixel_number+two_pixel_number+three_pixel_number+four_pixel_number)))
-                print("one_Whitepixel_w detect: {} points".format(one_pixel_number_w))
-                print("two_Whitepixel_w detect: {} points".format(two_pixel_number_w))
-                print("three_Whitepixel_w detect: {} points".format(three_pixel_number_w))
-                print("four_Whitepixel_w detect: {} points".format(four_pixel_number_w))
-                print("Accuracy_w:{}".format(max([one_pixel_number_w,two_pixel_number_w,three_pixel_number_w,four_pixel_number_w])/(one_pixel_number_w+two_pixel_number_w+three_pixel_number_w+four_pixel_number_w)))
-            else:
-                print("No any white defect")
-            cv2.imwrite(os.path.join(main_folder,"result_white.png"),draw_img_rgb)
-            if os.path.exists("result.csv")==0:
-                with open("result.csv",'w') as f:
-                    f.write("SN,Side,one_pixel_number,two_pixel_number,three_pixel_number,four_pixel_number,one_pixel_number_w,two_pixel_number_w,three_pixel_number_w,four_pixel_number_w,Accurate,Accurate_w \n")
-                
-            with open("result.csv",'a') as f:
-                sn=os.path.dirname(main_folder).split('\\')[-1] 
-                side=main_folder.split('\\')[-1] 
-                print("SN:{} Side:{} done!!!".format(sn,side))
-                f.write("{},{},{},{},{},{},{},{},{},{},{},{} \n".format(sn,side,one_pixel_number,two_pixel_number,three_pixel_number,four_pixel_number,one_pixel_number_w,two_pixel_number_w,three_pixel_number_w,four_pixel_number_w,Accurate,Accurate_w))
-        except Exception as e:
-            
-            print(e)
-            error_class = e.__class__.__name__ #取得錯誤類型
-            detail = e.args[0] #取得詳細內容
-            cl, exc, tb = sys.exc_info() #取得Call Stack
-            lastCallStack = traceback.extract_tb(tb)[-1] #取得Call Stack的最後一筆資料
-            fileName = lastCallStack[0] #取得發生的檔案名稱
-            lineNum = lastCallStack[1] #取得發生的行號
-            funcName = lastCallStack[2] #取得發生的函數名稱
-            errMsg = "File \"{}\", line {}, in {}: [{}] {}".format(fileName, lineNum, funcName, error_class, detail)
-            print(errMsg)
-            with open("error.csv",'a') as f:
-                sn=os.path.dirname(main_folder).split('\\')[-1] 
-                side=main_folder.split('\\')[-1] 
-                print("SN:{} Side:{} error!!!".format(sn,side))
-                f.write("{},{},{} \n".format(sn,side,errMsg))
+    cpu_count = mp.cpu_count()
+    print("cpu_count: ", cpu_count)
+    folder_num=len(folder_list)
+    task_num=0
+    while(task_num<folder_num):
+        ProcList=[]
+        
+        for i in range(cpu_count):
+            if (task_num+i)<folder_num:
+                ProcList.append(mp.Process(target=DefectProc,args=(folder_list[task_num+i],)))
+                ProcList[i].start()
+        for i in range(cpu_count):
+            if (task_num+i)<folder_num:
+                ProcList[i].join()
+        task_num+=cpu_count
+    
+
+        
+        
             
     
                 
